@@ -8,4 +8,5 @@ CREATE TABLE processed_events_aggregated (
 SELECT PULocationID, DOLocationID, streak_duration
 FROM processed_events_aggregated
 GROUP BY PULocationID, DOLocationID, streak_duration
-order BY streak_duration DESC;
+ORDER BY streak_duration DESC
+LIMIT 1;
