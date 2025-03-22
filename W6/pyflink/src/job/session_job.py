@@ -3,14 +3,16 @@ from pyflink.table import EnvironmentSettings, DataTypes, TableEnvironment, Stre
 from pyflink.common.watermark_strategy import WatermarkStrategy
 from pyflink.common.time import Duration
 
+            # PRIMARY KEY (PULocationID, DOLocationID) NOT ENFORCED
+
 def create_events_aggregated_sink(t_env):
     table_name = 'processed_events_aggregated'
     sink_ddl = f"""
         CREATE TABLE {table_name} (
-            event_hour TIMESTAMP(3),
-            test_data INT,
-            num_hits BIGINT,
-            PRIMARY KEY (event_hour, test_data) NOT ENFORCED
+            PULocationID INTEGER,
+            DOLocationID INTEGER,
+            num_trips BIGINT,
+            streak_duration BIGINT
         ) WITH (
             'connector' = 'jdbc',
             'url' = 'jdbc:postgresql://postgres:5432/postgres',
@@ -25,12 +27,18 @@ def create_events_aggregated_sink(t_env):
 
 def create_events_source_kafka(t_env):
     table_name = "events"
+    pattern = "yyyy-MM-dd HH:mm:ss"
     source_ddl = f"""
         CREATE TABLE {table_name} (
-            test_data INTEGER,
-            event_timestamp BIGINT,
-            event_watermark AS TO_TIMESTAMP_LTZ(event_timestamp, 3),
-            WATERMARK for event_watermark as event_watermark - INTERVAL '1' SECOND
+            lpep_pickup_datetime VARCHAR,
+            lpep_dropoff_datetime VARCHAR,
+            PULocationID INTEGER,
+            DOLocationID INTEGER,
+            passenger_count STRING,
+            trip_distance DOUBLE,
+            tip_amount DOUBLE,
+            dropoff_timestamp AS TO_TIMESTAMP(lpep_dropoff_datetime, '{pattern}'),
+            WATERMARK FOR dropoff_timestamp AS dropoff_timestamp - INTERVAL '5' SECOND
         ) WITH (
             'connector' = 'kafka',
             'properties.bootstrap.servers' = 'redpanda-1:29092',
@@ -42,13 +50,12 @@ def create_events_source_kafka(t_env):
         """
     t_env.execute_sql(source_ddl)
     return table_name
-
-
+ 
 def log_aggregation():
     # Set up the execution environment
     env = StreamExecutionEnvironment.get_execution_environment()
-    env.enable_checkpointing(10 * 1000)
-    env.set_parallelism(3)
+    env.enable_checkpointing(30 * 1000)
+    # env.set_parallelism(3)
 
     # Set up the table environment
     settings = EnvironmentSettings.new_instance().in_streaming_mode().build()
@@ -71,15 +78,15 @@ def log_aggregation():
 
         t_env.execute_sql(f"""
         INSERT INTO {aggregated_table}
-        SELECT
-            window_start as event_hour,
-            test_data,
-            COUNT(*) AS num_hits
+        SELECT            
+            PULocationID,
+            DOLocationID,
+            COUNT(*) AS num_trips,
+            TIMESTAMPDIFF(SECOND, MIN(dropoff_timestamp), MAX(dropoff_timestamp)) AS streak_duration
         FROM TABLE(
-            TUMBLE(TABLE {source_table}, DESCRIPTOR(event_watermark), INTERVAL '1' MINUTE)
+            TUMBLE(TABLE {source_table}, DESCRIPTOR(dropoff_timestamp), INTERVAL '5' MINUTE)
         )
-        GROUP BY window_start, test_data;
-        
+        GROUP BY PULocationID, DOLocationID, window_start, window_end;        
         """).wait()
 
     except Exception as e:
